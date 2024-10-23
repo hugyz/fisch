@@ -1,112 +1,89 @@
-import pyautogui
-import time
-import random
-from pynput import keyboard
-import threading
-from pynput.keyboard import Controller
+import gym
+import numpy as np
+from stable_baselines3 import DQN
+from stable_baselines3.common.env_checker import check_env
 
-# Use an event to signal stopping the macro
-stop_event = threading.Event()
-shift_held = False
-macro_thread = None  # Track the macro thread for instant stopping
-keyboard_controller = Controller()  # Controller for low-level key presses using pynput
+# Define the custom environment
+class BarControlEnv(gym.Env):
+    def __init__(self):
+        super(BarControlEnv, self).__init__()
+        
+        # Action space: 0 = release (move left), 1 = press (move right)
+        self.action_space = gym.spaces.Discrete(2)
+        
+        # Observation space: [white bar position, fish line midpoint], both between 0 and 1
+        self.observation_space = gym.spaces.Box(low=0, high=1, shape=(2,), dtype=np.float32)
+        
+        # Initial positions
+        self.bar_position = 0.5  # Start white bar in the middle
+        self.fish_line_midpoint = 0.5  # Start fish line in the middle
+        self.fish_line_width = 0.2  # Fixed width of the fish line
+        self.done = False
 
-# Function to simulate pressing and holding the backslash key
-def press_and_release_backslash():
-    keyboard_controller.press('\\')
-    print("Held: Backslash (\\)")
-    time.sleep(0.05)  # Hold the backslash for 0.05 seconds
-    keyboard_controller.release('\\')
-    print("Released: Backslash (\\)")
+    def reset(self):
+        """Reset the environment to an initial state and return the first observation."""
+        self.bar_position = 0.5
+        self.fish_line_midpoint = 0.5
+        self.done = False
+        return np.array([self.bar_position, self.fish_line_midpoint])
 
-# Function to simulate pressing and holding the 's' key
-def press_and_release_s():
-    keyboard_controller.press('s')
-    print("Held: s")
-    time.sleep(0.05)  # Hold 's' key for 0.05 seconds (faster)
-    keyboard_controller.release('s')
-    print("Released: s")
+    def step(self, action):
+        """Execute one time step within the environment."""
+        
+        # Move white bar based on action (0: move left, 1: move right)
+        if action == 1:
+            self.bar_position += 0.05  # move right
+        else:
+            self.bar_position -= 0.05  # move left
 
-# Function to simulate pressing and holding the 'Enter' key
-def press_and_release_enter():
-    keyboard_controller.press(keyboard.Key.enter)
-    print("Held: Enter")
-    time.sleep(0.05)  # Hold Enter key for 0.05 seconds (faster)
-    keyboard_controller.release(keyboard.Key.enter)
-    print("Released: Enter")
+        # Ensure the bar stays within [0, 1] range
+        self.bar_position = np.clip(self.bar_position, 0, 1)
 
-# Function to simulate the macro
-def execute_macro():
-    global continue_spam
-    continue_spam = True
+        # Move the fish line (could be random or in a fixed pattern)
+        self.fish_line_midpoint += np.random.uniform(-0.01, 0.01)  # random small movement
+        self.fish_line_midpoint = np.clip(self.fish_line_midpoint, 0 + self.fish_line_width / 2, 1 - self.fish_line_width / 2)
 
-    print("Macro started: Holding left mouse button, pressing backslash, then 's' and 'Enter' repeatedly.")
-    
-    # Step 1: Wait for 1 second
-    time.sleep(1)
+        # Calculate the fish line boundaries
+        fish_line_start = self.fish_line_midpoint - self.fish_line_width / 2
+        fish_line_end = self.fish_line_midpoint + self.fish_line_width / 2
 
-    # Step 2: Hold left mouse button down for 0.5 seconds, then release
-    pyautogui.mouseDown()
-    print("Held: LBM (Left Mouse Button)")
-    time.sleep(0.5)
-    pyautogui.mouseUp()
-    print("Released: LBM")
+        # Reward function with partial reward scaling and large penalty for going outside
+        if fish_line_start <= self.bar_position <= fish_line_end:
+            # Reward based on how close the white bar is to the center of the fish line
+            distance_from_center = abs(self.bar_position - self.fish_line_midpoint)
+            reward = 1.0 - distance_from_center  # More reward for being near the center
+        else:
+            reward = -5.0  # Heavy penalty if outside the fish line
 
-    # Step 3: Press and release the backslash key for 0.05 seconds using pynput
-    press_and_release_backslash()  # Use pynput to simulate pressing and holding backslash
+        # Optional: End episode if agent goes too far outside (for example, if it's a critical mistake)
+        if abs(self.bar_position - self.fish_line_midpoint) > 0.5:
+            self.done = True
 
-    # Step 4: Repeatedly press 's' and 'Enter' until spacebar is pressed
-    while continue_spam:
-        press_and_release_s()  # Press and hold 's'
-        press_and_release_enter()  # Press and hold 'Enter'
-        time.sleep(random.uniform(0.05, 0.1))  # Reduce the delay between 's' and 'Enter' presses
+        return np.array([self.bar_position, self.fish_line_midpoint]), reward, self.done, {}
 
-    print("Macro loop stopped by spacebar.")
+    def render(self, mode='human'):
+        """Render the environment (optional for visualization)."""
+        print(f"Bar position: {self.bar_position}, Fish line: {self.fish_line_midpoint}")
 
-# Function to detect key presses
-def on_press(key):
-    global shift_held, continue_spam
+# Initialize the environment
+env = BarControlEnv()
 
-    try:
-        print(f"Key pressed: {key}")  # Log every key press
+# Check if the environment follows the Gym API
+check_env(env, warn=True)
 
-        # Detect if Shift is pressed and held
-        if key == keyboard.Key.shift or key == keyboard.Key.shift_r:
-            shift_held = True
+# Initialize the DQN model
+model = DQN('MlpPolicy', env, verbose=1)
 
-        # Detect if Enter is pressed while Shift is held to start the macro
-        elif key == keyboard.Key.enter and shift_held:
-            print("Keybind detected: Shift + Enter")
-            # Start the macro in a separate thread
-            threading.Thread(target=execute_macro).start()
+# Train the agent for 10,000 timesteps
+model.learn(total_timesteps=10000)
 
-        # Detect spacebar to stop the macro
-        elif key == keyboard.Key.space:
-            print("Spacebar pressed: Stopping the macro.")
-            continue_spam = False  # Signal to stop the macro
+# Test the trained agent
+obs = env.reset()
+for _ in range(100):
+    action, _states = model.predict(obs)
+    obs, rewards, dones, info = env.step(action)
+    env.render()  # Print out the current state
 
-        # Detect 'q' to exit the program
-        elif key.char == 'q':  # Check if 'q' is pressed
-            print("Exiting program: Q detected.")
-            exit()  # Exit the program completely
-
-    except AttributeError:
-        # Handle special keys like shift, ctrl, etc.
-        pass
-
-# Function to detect when keys are released
-def on_release(key):
-    global shift_held
-    # Detect when Shift is released
-    if key == keyboard.Key.shift or key == keyboard.Key.shift_r:
-        shift_held = False
-
-# Main function to start listening for key events
-def main():
-    print("Listening for Shift + Enter to start the macro, Spacebar to stop it, and Q to exit...")
-    with keyboard.Listener(on_press=on_press, on_release=on_release) as listener:
-        listener.join()
-
-# Start the listener for key events
-if __name__ == "__main__":
-    main()
+    if dones:
+        print("Episode finished.")
+        break
