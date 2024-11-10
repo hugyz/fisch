@@ -8,6 +8,8 @@ from PIL import ImageGrab
 from pynput import keyboard
 from pynput.keyboard import Controller as KeyboardController
 from pynput.mouse import Controller as MouseController, Button
+import tensorflow as tf
+from collections import deque
 
 keyboard_controller = KeyboardController()
 mouse_controller = MouseController()
@@ -227,3 +229,124 @@ def run_fisch_env():
 
 if __name__ == "__main__":
     run_fisch_env()
+
+
+
+
+# DQLAgent Class
+class DQLAgent:
+    def __init__(self, state_size, action_size):
+        self.state_size = state_size
+        self.action_size = action_size
+        self.memory = deque(maxlen=2000)
+        self.gamma = 0.95    # discount rate
+        self.epsilon = 1.0   # exploration rate
+        self.epsilon_min = 0.01
+        self.epsilon_decay = 0.995
+        self.learning_rate = 0.001
+        self.model = self._build_model()
+
+    def _build_model(self):
+        # Neural Network model for DQL
+        model = tf.keras.models.Sequential([
+            tf.keras.layers.Dense(24, input_dim=self.state_size, activation='relu'),
+            tf.keras.layers.Dense(24, activation='relu'),
+            tf.keras.layers.Dense(self.action_size, activation='linear')
+        ])
+        model.compile(loss='mse', optimizer=tf.keras.optimizers.Adam(learning_rate=self.learning_rate))
+        return model
+
+    def remember(self, state, action, reward, next_state, done):
+        self.memory.append((state, action, reward, next_state, done))
+
+    def act(self, state):
+        if np.random.rand() <= self.epsilon:
+            return np.random.choice(self.action_size)
+        act_values = self.model.predict(state)
+        return np.argmax(act_values[0])
+
+    def replay(self, batch_size=32):
+        if len(self.memory) < batch_size:
+            return
+        minibatch = np.random.choice(len(self.memory), batch_size, replace=False)
+        for index in minibatch:
+            state, action, reward, next_state, done = self.memory[index]
+            target = reward
+            if not done:
+                target = (reward + self.gamma * np.amax(self.model.predict(next_state)[0]))
+            target_f = self.model.predict(state)
+            target_f[0][action] = target
+            self.model.fit(state, target_f, epochs=1, verbose=0)
+        if self.epsilon > self.epsilon_min:
+            self.epsilon *= self.epsilon_decay
+
+# Initialize DQLAgent
+state_size = 1  # Using the distance between fish and bar as the state
+action_size = 2  # Actions: press or release space
+agent = DQLAgent(state_size, action_size)
+
+# Additional DQL-related functions
+def get_dql_state(fish_x, bar_x):
+    """Calculate the state as the normalized distance."""
+    distance = (fish_x - bar_x) / 960.0  # Normalize by screen width
+    return np.reshape(np.array([distance]), [1, state_size])
+
+def compute_dql_reward(fish_x, bar_x):
+    """Assigns rewards based on how close the fish is to the bar center."""
+    distance = abs(fish_x - bar_x)
+    if distance < 50:
+        return 10
+    elif distance < 100:
+        return 5
+    else:
+        return -distance / 100
+
+def perform_dql_action(action, state):
+    """Executes DQL-decided actions (press or release spacebar)."""
+    if action == 1 and not state["space_held"]:
+        keyboard_controller.press(' ')
+        state["space_held"] = True
+        print_debug("Spacebar pressed by DQL.")
+    elif action == 0 and state["space_held"]:
+        keyboard_controller.release(' ')
+        state["space_held"] = False
+        print_debug("Spacebar released by DQL.")
+
+def run_dql_environment(config, state):
+    """Separate DQL environment for decision making in parallel with main environment."""
+    try:
+        while state["listener_active"]:
+            fish_x = find_fish_center_x(config)
+            bar_x = find_bar_center_x(config, state).get("center")
+            if fish_x is None or bar_x is None:
+                continue
+
+            # DQL State, Action, and Reward
+            current_state = get_dql_state(fish_x, bar_x)
+            action = agent.act(current_state)
+            perform_dql_action(action, state)
+
+            reward = compute_dql_reward(fish_x, bar_x)
+            next_state = get_dql_state(fish_x, bar_x)
+            done = False
+            agent.remember(current_state, action, reward, next_state, done)
+            agent.replay()
+    except KeyboardInterrupt:
+        print("DQL Execution interrupted.")
+
+# Start DQL Environment as a separate thread alongside existing code
+if __name__ == "__main__":
+    config = fisch_env_config()
+    state = create_initial_state()
+
+    # Run existing main function
+    main_thread = threading.Thread(target=run_fisch_env, args=(config, state))
+    main_thread.start()
+
+    # Run DQL agent in parallel
+    dql_thread = threading.Thread(target=run_dql_environment, args=(config, state))
+    dql_thread.start()
+
+    # Wait for both threads to complete
+    main_thread.join()
+    dql_thread.join()
